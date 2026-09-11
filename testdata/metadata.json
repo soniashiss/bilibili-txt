@@ -1,0 +1,28 @@
+{
+  "id": "BVfake123",
+  "title": "Fake Video Title — 测试样例",
+  "duration": 187,
+  "webpage_url": "https://www.bilibili.com/video/BVfake123",
+  "extractor": "BiliBili",
+  "uploader": "fakeuser",
+  "upload_date": "20260101",
+  "playlist_count": 1,
+  "subtitles": {
+    "zh-CN": [
+      {
+        "ext": "srt",
+        "url": "https://example.invalid/subs/zh-CN.srt",
+        "name": "Chinese"
+      }
+    ]
+  },
+  "automatic_captions": {
+    "ai-zh": [
+      {
+        "ext": "srt",
+        "url": "https://example.invalid/auto/ai-zh.srt",
+        "name": "AI Chinese"
+      }
+    ]
+  }
+}

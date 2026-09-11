@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Fake yt-dlp for unit + integration tests (plan §5.1–§5.3).
+#
+# Command family recognition (order-insensitive; matches plan §5.1 which
+# combines --dump-single-json + --write-subs on the same invocation):
+#   --version                    → print YYYY.MM.DD version banner
+#   -J / --dump-single-json      → emit metadata json to stdout
+#                                  (wins over --write-subs and -x)
+#   -x / --extract-audio         → copy sample.m4a
+#                                  (wins over --write-subs)
+#   --write-subs / --write-auto-subs
+#                                → copy sample.srt
+#
+# BV id is extracted from the *last* URL argument.
+#   BVnosub*   → testdata/metadata-nosub.json (empty subtitles map)
+#   otherwise  → testdata/metadata.json
+#
+# Failure injection via FAKEBIN_FAIL_YTDLP:
+#   metadata | subtitle | audio → fail that mode
+#   all                         → fail unconditionally
+#   any other non-empty value   → exit 2 (config error)
+#
+# Written for bash 3.2 (macOS default).
+set -euo pipefail
+
+self_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+testdata_dir=$(cd "$self_dir/.." && pwd)
+
+version_date="2026.01.15"
+
+# --- validate FAKEBIN_FAIL_YTDLP up-front --------------------------------
+fail_mode="${FAKEBIN_FAIL_YTDLP:-}"
+case "$fail_mode" in
+  ""|metadata|subtitle|audio|all) : ;;
+  *)
+    printf 'fake yt-dlp: unsupported FAKEBIN_FAIL_YTDLP=%s (want metadata|subtitle|audio|all)\n' "$fail_mode" >&2
+    exit 2
+    ;;
+esac
+
+# --- flag scan -----------------------------------------------------------
+has_version=0
+has_json=0
+has_extract=0
+has_write_subs=0
+paths_dir=""
+url=""
+
+prev=""
+for arg in "$@"; do
+  case "$arg" in
+    --version) has_version=1 ;;
+    -J|--dump-single-json|--dump-json) has_json=1 ;;
+    -x|--extract-audio) has_extract=1 ;;
+    --write-subs|--write-auto-subs) has_write_subs=1 ;;
+  esac
+  if [ "$prev" = "--paths" ]; then
+    paths_dir="$arg"
+  fi
+  case "$arg" in
+    http://*|https://*) url="$arg" ;;
+  esac
+  prev="$arg"
+done
+
+# --- routing (priority: version > json > extract > subs) ------------------
+mode=""
+if [ "$has_version" -eq 1 ]; then
+  mode="version"
+elif [ "$has_json" -eq 1 ]; then
+  mode="metadata"
+elif [ "$has_extract" -eq 1 ]; then
+  mode="audio"
+elif [ "$has_write_subs" -eq 1 ]; then
+  mode="subtitle"
+fi
+
+extract_bv() {
+  local u="$1"
+  local bv
+  bv=$(printf '%s' "$u" | grep -oE 'BV[[:alnum:]]+' | head -n1 || true)
+  if [ -z "$bv" ]; then
+    bv="BVunknown"
+  fi
+  printf '%s' "$bv"
+}
+
+case "$mode" in
+  version)
+    printf '%s\n' "$version_date"
+    ;;
+
+  metadata)
+    if [ -z "$url" ]; then
+      printf 'fake yt-dlp: URL is required for metadata mode\n' >&2
+      exit 2
+    fi
+    if [ "$fail_mode" = "metadata" ] || [ "$fail_mode" = "all" ]; then
+      printf 'fake yt-dlp: metadata fetch failed (injected)\n' >&2
+      exit 1
+    fi
+    bv=$(extract_bv "$url")
+    case "$bv" in
+      BVnosub*) fixture="$testdata_dir/metadata-nosub.json" ;;
+      *)        fixture="$testdata_dir/metadata.json" ;;
+    esac
+    if [ ! -f "$fixture" ]; then
+      printf 'fake yt-dlp: metadata fixture missing: %s\n' "$fixture" >&2
+      exit 2
+    fi
+    cat "$fixture"
+    ;;
+
+  subtitle)
+    if [ -z "$url" ]; then
+      printf 'fake yt-dlp: URL is required for subtitle mode\n' >&2
+      exit 2
+    fi
+    if [ "$fail_mode" = "subtitle" ] || [ "$fail_mode" = "all" ]; then
+      printf 'fake yt-dlp: subtitle download failed (injected)\n' >&2
+      exit 1
+    fi
+    if [ -z "$paths_dir" ]; then
+      printf 'fake yt-dlp: --paths is required for subtitle mode\n' >&2
+      exit 2
+    fi
+    mkdir -p "$paths_dir"
+    bv=$(extract_bv "$url")
+    src="$testdata_dir/sample.srt"
+    if [ ! -f "$src" ]; then
+      printf 'fake yt-dlp: sample.srt fixture missing: %s\n' "$src" >&2
+      exit 2
+    fi
+    cp "$src" "$paths_dir/${bv}.zh-CN.srt"
+    ;;
+
+  audio)
+    if [ -z "$url" ]; then
+      printf 'fake yt-dlp: URL is required for audio mode\n' >&2
+      exit 2
+    fi
+    if [ "$fail_mode" = "audio" ] || [ "$fail_mode" = "all" ]; then
+      printf 'fake yt-dlp: audio download failed (injected)\n' >&2
+      exit 1
+    fi
+    if [ -z "$paths_dir" ]; then
+      printf 'fake yt-dlp: --paths is required for audio mode\n' >&2
+      exit 2
+    fi
+    mkdir -p "$paths_dir"
+    bv=$(extract_bv "$url")
+    src="$testdata_dir/sample.m4a"
+    if [ ! -f "$src" ]; then
+      printf 'fake yt-dlp: sample.m4a fixture missing: %s\n' "$src" >&2
+      exit 2
+    fi
+    cp "$src" "$paths_dir/${bv}.m4a"
+    ;;
+
+  *)
+    printf 'fake yt-dlp: unsupported invocation; args=%s\n' "$*" >&2
+    exit 2
+    ;;
+esac

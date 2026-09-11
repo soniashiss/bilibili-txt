@@ -1,0 +1,45 @@
+# Binaries
+/bilibili-txt
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build/test cache
+*.test
+*.out
+coverage.txt
+coverage.html
+/.gocache/
+/.gotmp/
+
+# Runtime output
+/logs/
+/transcripts/
+/.tmp/
+*.wav
+*.m4a
+*.mp3
+*.srt
+
+# Keep testdata sample assets, ignore ad-hoc outputs
+!/testdata/**/*.srt
+!/testdata/**/*.json
+!/testdata/**/*.wav
+!/testdata/**/*.m4a
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# User-local config
+config.local.yaml
+
+# User-local real config (track the example, ignore the copied real file)
+/config/config.yaml
+
+# Internal design/planning notes — not shipped
+/docs/

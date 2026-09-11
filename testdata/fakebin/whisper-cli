@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Fake whisper-cli for unit + integration tests (plan §5.5).
+#
+# Recognised invocations:
+#   whisper-cli --version
+#   whisper-cli -m <model> -f <wav> -l zh -osrt -of <prefix> [--print-progress ...]
+#
+# The transcribe branch requires -f, -osrt, -of, and writes
+# testdata/sample-asr.srt to "<prefix>.srt". Progress lines are emitted
+# only when --print-progress is present.
+#
+# Failure injection:
+#   FAKEBIN_FAIL_WHISPER=1 -> exit 1 with matching stderr line
+set -euo pipefail
+
+self_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+testdata_dir=$(cd "$self_dir/.." && pwd)
+
+if [ "${1:-}" = "--version" ]; then
+  cat <<'BANNER'
+whisper-cli version 1.5.0 (fake stub for bilibili-txt tests)
+BANNER
+  exit 0
+fi
+
+model=""
+wav=""
+prefix=""
+want_srt=0
+want_progress=0
+
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    -m) model="$arg" ;;
+    -f) wav="$arg" ;;
+    -of) prefix="$arg" ;;
+  esac
+  case "$arg" in
+    -osrt) want_srt=1 ;;
+    --print-progress) want_progress=1 ;;
+  esac
+  prev="$arg"
+done
+
+if [ -z "$wav" ] || [ -z "$prefix" ] || [ "$want_srt" -ne 1 ]; then
+  printf 'fake whisper-cli: -f, -osrt and -of are required\n' >&2
+  exit 2
+fi
+
+if [ "${FAKEBIN_FAIL_WHISPER:-}" = "1" ]; then
+  printf 'fake whisper-cli: transcription failed (injected)\n' >&2
+  exit 1
+fi
+
+src="$testdata_dir/sample-asr.srt"
+if [ ! -f "$src" ]; then
+  printf 'fake whisper-cli: sample-asr.srt fixture missing: %s\n' "$src" >&2
+  exit 2
+fi
+
+# whisper-cli emits progress to stdout by default; mirror that.
+if [ "$want_progress" -eq 1 ]; then
+  printf 'whisper_print_progress_callback: progress = 25%%\n'
+  printf 'whisper_print_progress_callback: progress = 100%%\n'
+fi
+
+mkdir -p "$(dirname "$prefix")"
+cp "$src" "${prefix}.srt"
+# Model path is accepted but not consulted; keep the arg parser happy.
+: "${model:-}"

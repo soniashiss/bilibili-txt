@@ -1,0 +1,12 @@
+{
+  "id": "BVnosub999",
+  "title": "No Subtitle Video — 无字幕测试样例",
+  "duration": 92,
+  "webpage_url": "https://www.bilibili.com/video/BVnosub999",
+  "extractor": "BiliBili",
+  "uploader": "fakeuser",
+  "upload_date": "20260101",
+  "playlist_count": 1,
+  "subtitles": {},
+  "automatic_captions": {}
+}

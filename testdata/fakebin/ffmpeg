@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Fake ffmpeg for unit + integration tests (plan §5.4).
+#
+# Recognised invocations:
+#   ffmpeg -version
+#   ffmpeg -y -i <input.m4a> -vn -ar 16000 -ac 1 -c:a pcm_s16le <output.wav>
+#
+# The transcode branch verifies the required flags (-ar 16000, -ac 1) and
+# writes an empty (but existing) file at <output.wav>. It never inspects
+# the input's audio bytes — this is a stub.
+#
+# Failure injection:
+#   FAKEBIN_FAIL_FFMPEG=1 -> exit 1 with a matching stderr line
+set -euo pipefail
+
+if [ "${1:-}" = "-version" ]; then
+  cat <<'BANNER'
+ffmpeg version 7.1 (fake stub for bilibili-txt tests)
+built with clang-fake
+configuration: --disable-everything --enable-nothing
+BANNER
+  exit 0
+fi
+
+have_ar_16k=0
+have_ac_mono=0
+input=""
+output=""
+
+# Scan args: capture flags and treat trailing non-flag as output.
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    -i) input="$arg" ;;
+    -ar) [ "$arg" = "16000" ] && have_ar_16k=1 ;;
+    -ac) [ "$arg" = "1" ] && have_ac_mono=1 ;;
+  esac
+  prev="$arg"
+done
+
+# Output = last argument that is not a flag and not a flag value.
+# For the exact command we care about, the last token is the output path.
+last_arg="${!#}"
+case "$last_arg" in
+  -*) output="" ;;
+  *) output="$last_arg" ;;
+esac
+
+if [ "$have_ar_16k" -ne 1 ] || [ "$have_ac_mono" -ne 1 ]; then
+  printf 'fake ffmpeg: required flags missing (-ar 16000 and/or -ac 1)\n' >&2
+  exit 2
+fi
+if [ -z "$input" ] || [ -z "$output" ]; then
+  printf 'fake ffmpeg: input (-i) and output are required\n' >&2
+  exit 2
+fi
+
+if [ "${FAKEBIN_FAIL_FFMPEG:-}" = "1" ]; then
+  printf 'fake ffmpeg: transcode failed (injected)\n' >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$output")"
+: > "$output"
