@@ -954,3 +954,129 @@ func TestLoad_AuthUnknownFieldRejected(t *testing.T) {
 		t.Fatal("Load should reject unknown auth.* fields (typo protection)")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Server (无参数启动时的本地 Web 界面)
+// ---------------------------------------------------------------------------
+
+// TestServerDefaults pins the built-in server defaults: random port and
+// both UX knobs on (auto-open browser, Chrome --app window on macOS).
+func TestServerDefaults(t *testing.T) {
+	fakeHome(t)
+	c, err := Default()
+	if err != nil {
+		t.Fatalf("Default: %v", err)
+	}
+	if c.Server.Port != 0 {
+		t.Errorf("Server.Port=%d want 0 (random port)", c.Server.Port)
+	}
+	if !c.Server.OpenBrowser {
+		t.Errorf("Server.OpenBrowser=%v want true", c.Server.OpenBrowser)
+	}
+	if !c.Server.ChromeApp {
+		t.Errorf("Server.ChromeApp=%v want true", c.Server.ChromeApp)
+	}
+}
+
+// TestServerLoad covers both the explicit-override path (all three
+// fields written, including the bools flipped to false) and the
+// partial-override path (only port written; the true-by-default bools
+// must survive because rawServer uses *bool).
+func TestServerLoad(t *testing.T) {
+	fakeHome(t)
+	dir := t.TempDir()
+
+	full := "server:\n  port: 8787\n  open_browser: false\n  chrome_app: false\n"
+	c, err := Load(writeTemp(t, dir, "full.yaml", full))
+	if err != nil {
+		t.Fatalf("Load(full server block): %v", err)
+	}
+	if c.Server.Port != 8787 {
+		t.Errorf("Server.Port=%d want 8787", c.Server.Port)
+	}
+	if c.Server.OpenBrowser {
+		t.Errorf("Server.OpenBrowser=%v want false (explicit)", c.Server.OpenBrowser)
+	}
+	if c.Server.ChromeApp {
+		t.Errorf("Server.ChromeApp=%v want false (explicit)", c.Server.ChromeApp)
+	}
+
+	portOnly := "server:\n  port: 8787\n"
+	c2, err := Load(writeTemp(t, dir, "port-only.yaml", portOnly))
+	if err != nil {
+		t.Fatalf("Load(port-only server block): %v", err)
+	}
+	if c2.Server.Port != 8787 {
+		t.Errorf("Server.Port=%d want 8787", c2.Server.Port)
+	}
+	if !c2.Server.OpenBrowser {
+		t.Errorf("Server.OpenBrowser=%v want true (default preserved)", c2.Server.OpenBrowser)
+	}
+	if !c2.Server.ChromeApp {
+		t.Errorf("Server.ChromeApp=%v want true (default preserved)", c2.Server.ChromeApp)
+	}
+}
+
+// TestServerUnknownFieldRejected inherits KnownFields strictness for
+// the nested server map: a typo (`prt`) must fail loudly rather than
+// silently starting the UI on an unexpected port.
+func TestServerUnknownFieldRejected(t *testing.T) {
+	fakeHome(t)
+	dir := t.TempDir()
+	body := "server:\n  prt: 1\n"
+	p := writeTemp(t, dir, "server-typo.yaml", body)
+
+	if _, err := Load(p); err == nil {
+		t.Fatal("Load should reject unknown server.* fields (typo protection)")
+	}
+}
+
+// TestServerMerge locks the value-semantics merge for the server block:
+// a zero-valued overlay leaves base untouched; non-zero / explicitly
+// true overlay values win. Today no CLI flag produces a Server overlay,
+// so this pins the intended contract ahead of that work.
+func TestServerMerge(t *testing.T) {
+	fakeHome(t)
+	base := mustDefault(t)
+	base.Server = Server{Port: 9000, OpenBrowser: false, ChromeApp: true}
+
+	got := Merge(base, &Config{})
+	if got.Server != base.Server {
+		t.Errorf("empty overlay changed Server: got=%+v want=%+v", got.Server, base.Server)
+	}
+
+	overlay := &Config{Server: Server{Port: 8080, OpenBrowser: true, ChromeApp: false}}
+	got = Merge(base, overlay)
+	if got.Server.Port != 8080 {
+		t.Errorf("Server.Port=%d want 8080 (non-zero overlay wins)", got.Server.Port)
+	}
+	if !got.Server.OpenBrowser {
+		t.Errorf("Server.OpenBrowser=%v want true (overlay turns on)", got.Server.OpenBrowser)
+	}
+	if !got.Server.ChromeApp {
+		t.Errorf("Server.ChromeApp=%v want true (base already true, overlay false must not clear)",
+			got.Server.ChromeApp)
+	}
+}
+
+// TestValidatePort checks the server port range: 0 (random) and
+// 1..65535 are legal; anything outside is rejected.
+func TestValidatePort(t *testing.T) {
+	for _, p := range []int{0, 1, 8080, 65535} {
+		c := &Config{Format: "txt", Logging: Logging{Format: "text", Level: "info"},
+			Server: Server{Port: p}}
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate(port=%d) unexpected err=%v", p, err)
+		}
+	}
+	for _, p := range []int{-1, 70000} {
+		c := &Config{Format: "txt", Logging: Logging{Format: "text", Level: "info"},
+			Server: Server{Port: p}}
+		err := c.Validate()
+		if err == nil {
+			t.Errorf("Validate(port=%d) want error, got nil", p)
+		} else if !strings.Contains(err.Error(), "server.port") {
+			t.Errorf("Validate(port=%d) err=%v should mention server.port", p, err)
+		}
+	}
+}

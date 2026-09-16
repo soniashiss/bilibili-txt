@@ -13,15 +13,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"bilibili-txt/internal/asr"
-	"bilibili-txt/internal/audio"
+	"bilibili-txt/internal/biliurl"
 	"bilibili-txt/internal/config"
-	"bilibili-txt/internal/downloader"
 	"bilibili-txt/internal/logger"
 	"bilibili-txt/internal/naming"
 	"bilibili-txt/internal/pathx"
 	"bilibili-txt/internal/pipeline"
 	"bilibili-txt/internal/preflight"
+	"bilibili-txt/internal/wire"
 )
 
 type NormalizedInput struct {
@@ -41,9 +40,12 @@ func newRootCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "bilibili-txt <URL>",
-		Short: "从 Bilibili 视频链接生成文字稿（优先字幕，其次 ASR）",
+		Use:   "bilibili-txt [视频链接]",
+		Short: "从 Bilibili 视频链接生成文字稿（优先字幕，其次 ASR）；不带参数时启动图形界面",
 		Long: `bilibili-txt 优先使用视频的官方 CC 字幕生成文字稿；若无字幕则退回音频 + whisper-cli ASR。
+
+不带任何参数直接运行 bilibili-txt 时，会在本机启动图形界面（浏览器窗口），
+在页面里粘贴视频链接即可转换，历史文稿也能在界面中查看。
 
 支持的输入格式：
   - https://www.bilibili.com/video/BVxxx[/...]
@@ -57,7 +59,10 @@ Shell 引号提示（zsh 用户尤其注意）：
   建议永远给 URL 加单引号，例如：
     bilibili-txt 'https://www.bilibili.com/video/BVxxx/?spm_id_from=...'
   或者直接去掉 ? 后面的追踪参数、或只传 BVxxx。`,
-		Example: `  # 单引号包住完整 URL（推荐，兼容 URL 里的 ? & 反引号 等）
+		Example: `  # 不带参数：启动图形界面
+  bilibili-txt
+
+  # 单引号包住完整 URL（推荐，兼容 URL 里的 ? & 反引号 等）
   bilibili-txt 'https://www.bilibili.com/video/BV1xx411c7mD/?spm_id_from=333.1007'
 
   # 去掉追踪参数后可以不加引号
@@ -73,9 +78,6 @@ Shell 引号提示（zsh 用户尤其注意）：
   bilibili-txt -o ~/Documents/transcripts BV1xx411c7mD`,
 		Version: version,
 		Args: func(c *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return errors.New("请提供视频链接（支持 bilibili.com/video/BVxxx、b23.tv/xxx、纯 BVxxx）")
-			}
 			if len(args) > 1 {
 				return fmt.Errorf("最多接受 1 个视频链接，收到 %d 个", len(args))
 			}
@@ -84,6 +86,13 @@ Shell 引号提示（zsh 用户尤其注意）：
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(c *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				if err := rejectUIIncompatibleFlags(c); err != nil {
+					return err
+				}
+				return runUI(c.ErrOrStderr(), configPath)
+			}
+
 			if overwrite && skip {
 				return errors.New("--overwrite 与 --skip 不能同时使用")
 			}
@@ -151,11 +160,7 @@ Shell 引号提示（zsh 用户尤其注意）：
 				NoInteractive:    noInteractive,
 				Prompter:         &naming.StdinPrompter{In: os.Stdin, Out: c.ErrOrStderr()},
 			}
-			pdeps := pipeline.Deps{
-				Downloader: defaultNewDownloader(cfg),
-				Transcoder: defaultNewTranscoder(cfg),
-				Recognizer: defaultNewRecognizer(cfg),
-			}
+			pdeps := wire.BuildDeps(cfg)
 
 			result, err := pipeline.Run(ctx, in, cfg, pdeps)
 			if err != nil {
@@ -199,29 +204,6 @@ func printSuccess(stdout io.Writer, r *pipeline.Result) {
 		r.Source, r.OutputPath, r.Duration.Round(time.Millisecond), videoDur, title)
 }
 
-func defaultNewDownloader(cfg *config.Config) downloader.Downloader {
-	return &downloader.YtdlpDownloader{
-		Binary:             cfg.Binaries.Ytdlp,
-		Stderr:             logger.StderrSink("yt-dlp"),
-		CookiesFromBrowser: cfg.Auth.CookiesFromBrowser,
-	}
-}
-
-func defaultNewTranscoder(cfg *config.Config) audio.Transcoder {
-	return &audio.FfmpegTranscoder{
-		Binary: cfg.Binaries.Ffmpeg,
-		Stderr: logger.StderrSink("ffmpeg"),
-	}
-}
-
-func defaultNewRecognizer(cfg *config.Config) asr.Recognizer {
-	return &asr.WhisperRecognizer{
-		Binary: cfg.Binaries.WhisperCLI,
-		Stdout: logger.StderrSink("whisper-progress"),
-		Stderr: logger.StderrSink("whisper"),
-	}
-}
-
 func defaultIsTTY() bool {
 	fi, err := os.Stdin.Stat()
 	if err != nil {
@@ -229,10 +211,6 @@ func defaultIsTTY() bool {
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
 }
-
-var bvidRe = regexp.MustCompile(`\bBV[0-9A-Za-z]{8,}\b`)
-
-var bilibiliVideoHostRe = regexp.MustCompile(`^https?://(?:www\.|m\.)?bilibili\.com/video/`)
 
 var argvBackslashEscapeRe = regexp.MustCompile(`\\([?&=#;,:/@+$!*()\[\]{}~'"` + "`" + `])`)
 
@@ -257,34 +235,11 @@ func sanitizeArgvURL(raw string) string {
 
 func normalizeInput(raw string) (NormalizedInput, error) {
 	s := sanitizeArgvURL(raw)
-	if s == "" {
-		return NormalizedInput{}, errors.New("视频链接为空")
+	in, err := biliurl.Normalize(s)
+	if err != nil {
+		return NormalizedInput{}, fmt.Errorf("%w（支持 bilibili.com/video/BVxxx、b23.tv/xxx 或纯 BVxxx 链接，可带可不带 https://）", err)
 	}
-
-	if !strings.Contains(s, "://") {
-		if m := bvidRe.FindString(s); m != "" && m == s {
-			return NormalizedInput{
-				URL:  "https://www.bilibili.com/video/" + m,
-				BVID: m,
-			}, nil
-		}
-		if strings.HasPrefix(s, "BV") {
-			return NormalizedInput{}, fmt.Errorf("无效视频链接 %q（BV id 不应含空格或额外字符）", raw)
-		}
-	}
-
-	if bilibiliVideoHostRe.MatchString(s) {
-		if m := bvidRe.FindString(s); m != "" {
-			return NormalizedInput{URL: s, BVID: m}, nil
-		}
-		return NormalizedInput{}, fmt.Errorf("无法从 %q 中提取 BVID", raw)
-	}
-
-	if strings.HasPrefix(s, "https://b23.tv/") || strings.HasPrefix(s, "http://b23.tv/") {
-		return NormalizedInput{URL: s, BVID: ""}, nil
-	}
-
-	return NormalizedInput{}, fmt.Errorf("不支持的视频链接 %q（支持 bilibili.com/video/BVxxx、b23.tv/xxx、纯 BVxxx）", raw)
+	return NormalizedInput{URL: in.URL, BVID: in.BVID}, nil
 }
 
 func normalizePathFlag(raw, flagName string) (string, error) {

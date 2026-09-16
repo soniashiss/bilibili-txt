@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1182,5 +1183,301 @@ func TestNew_TildePathRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "~") {
 		t.Fatalf("error should mention ~ expansion, got: %v", err)
+	}
+}
+
+// safeBuffer is a mutex-guarded bytes.Buffer used as an injected
+// ExternalWriter: the sink write path and the test assertions may touch it
+// from different goroutines, and -race must stay clean.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureHandler is a slog.Handler that accepts every record at debug level
+// or above and snapshots it (including attrs accumulated via WithAttrs),
+// independent of any sibling handler's level. It lets us prove the fan-out
+// ORs Enabled across branches while each branch still filters in Handle.
+type captureHandler struct {
+	mu    sync.Mutex
+	attrs []slog.Attr
+	recs  []capturedRecord
+}
+
+type capturedRecord struct {
+	level slog.Level
+	msg   string
+	attrs []slog.Attr
+}
+
+func (h *captureHandler) Enabled(_ context.Context, l slog.Level) bool {
+	return l >= slog.LevelDebug
+}
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rec := capturedRecord{level: r.Level, msg: r.Message, attrs: append([]slog.Attr{}, h.attrs...)}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs = append(rec.attrs, a)
+		return true
+	})
+	h.recs = append(h.recs, rec)
+	return nil
+}
+
+func (h *captureHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	merged := append(append([]slog.Attr{}, h.attrs...), attrs...)
+	return &captureHandler{attrs: merged}
+}
+
+func (h *captureHandler) WithGroup(_ string) slog.Handler { return h }
+
+func (h *captureHandler) records() []capturedRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]capturedRecord{}, h.recs...)
+}
+
+// restoreGlobalLogger snapshots the process-wide logger state and restores
+// it (plus slog.Default) on test cleanup, closing whatever Init installed.
+func restoreGlobalLogger(t *testing.T) {
+	t.Helper()
+	globalMu.Lock()
+	prev := global
+	globalMu.Unlock()
+	prevDefault := slog.Default()
+	t.Cleanup(func() {
+		globalMu.Lock()
+		cur := global
+		global = prev
+		globalMu.Unlock()
+		if cur != nil && cur != prev {
+			_ = cur.Close()
+		}
+		slog.SetDefault(prevDefault)
+	})
+}
+
+// TestOptionsExtraHandler_Fanout: an injected Handler is an additional slog
+// sink that receives the same records as the primary stderr handler — used by
+// the Web UI to stream step start/done/fail events to the browser.
+func TestOptionsExtraHandler_Fanout(t *testing.T) {
+	restoreGlobalLogger(t)
+
+	var stderr bytes.Buffer
+	var injected bytes.Buffer
+	if err := Init(Options{
+		Level:   "info",
+		Stderr:  &stderr,
+		Handler: slog.NewTextHandler(&injected, nil),
+		Now:     fixedNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	Default().Slog().Info("step fanout", "step", "download")
+
+	if out := stderr.String(); !strings.Contains(out, "step fanout") || !strings.Contains(out, "step=download") {
+		t.Fatalf("primary stderr handler missing record/attr: %q", out)
+	}
+	if out := injected.String(); !strings.Contains(out, "step fanout") || !strings.Contains(out, "step=download") {
+		t.Fatalf("injected handler missing record/attr: %q", out)
+	}
+}
+
+// TestOptionsExtraHandler_WithAttrs pins WithAttrs/WithGroup propagation:
+// attrs attached to a derived logger (WithComponent/With) must reach the
+// injected branch too, not just the primary handler.
+func TestOptionsExtraHandler_WithAttrs(t *testing.T) {
+	var stderr bytes.Buffer
+	var injected bytes.Buffer
+	lg, err := New(Options{
+		Level:   "info",
+		Stderr:  &stderr,
+		Handler: slog.NewTextHandler(&injected, nil),
+		Now:     fixedNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lg.Close()
+
+	child := lg.WithComponent("webui").With("request", "req-1")
+	child.Slog().Info("child msg")
+
+	for name, out := range map[string]string{"stderr": stderr.String(), "injected": injected.String()} {
+		if !strings.Contains(out, "child msg") {
+			t.Fatalf("%s missing record: %q", name, out)
+		}
+		if !strings.Contains(out, "component=webui") {
+			t.Fatalf("%s missing inherited component attr: %q", name, out)
+		}
+		if !strings.Contains(out, "request=req-1") {
+			t.Fatalf("%s missing chained With attr: %q", name, out)
+		}
+	}
+}
+
+// TestFanoutIndependentLevels: Enabled is the OR of every branch, so a
+// debug-enabled injected branch still observes Debug records that the
+// info-level primary handler drops. Each branch filters inside its own Handle
+// — the primary must not see Debug, the capture branch must see both.
+func TestFanoutIndependentLevels(t *testing.T) {
+	var stderr bytes.Buffer
+	capture := &captureHandler{}
+	lg, err := New(Options{
+		Level:   "info",
+		Stderr:  &stderr,
+		Handler: capture,
+		Now:     fixedNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lg.Close()
+
+	lg.Slog().Debug("dbg-record")
+	lg.Slog().Info("inf-record")
+
+	out := stderr.String()
+	if strings.Contains(out, "dbg-record") {
+		t.Fatalf("info-level primary handler must drop Debug, got: %q", out)
+	}
+	if !strings.Contains(out, "inf-record") {
+		t.Fatalf("primary handler missing Info: %q", out)
+	}
+
+	recs := capture.records()
+	var sawDebug, sawInfo bool
+	for _, r := range recs {
+		switch r.msg {
+		case "dbg-record":
+			sawDebug = true
+		case "inf-record":
+			sawInfo = true
+		}
+	}
+	if !sawDebug {
+		t.Fatalf("debug-enabled injected branch must receive Debug record, got %+v", recs)
+	}
+	if !sawInfo {
+		t.Fatalf("injected branch must also receive Info record, got %+v", recs)
+	}
+}
+
+// TestOptionsExternalWriter: with WriteDebugFile on, an injected
+// ExternalWriter receives the same framed whole lines (prefix + payload) as
+// the debug file.
+func TestOptionsExternalWriter(t *testing.T) {
+	dir := t.TempDir()
+	debugPath := filepath.Join(dir, "debug.log")
+	external := &safeBuffer{}
+	lg, err := New(Options{
+		WriteDebugFile: true,
+		DebugLogFile:   debugPath,
+		ExternalWriter: external,
+		Stderr:         io.Discard,
+		Now:            fixedNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := lg.StderrSink("yt-dlp")
+	if sink == io.Discard {
+		t.Fatal("StderrSink must not short-circuit to io.Discard when ExternalWriter is set")
+	}
+	if _, err := io.WriteString(sink, "downloading video\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	wantPrefix := "[" + fixedNow().Format("15:04:05.000") + " yt-dlp] "
+	wantLine := wantPrefix + "downloading video\n"
+	if got := external.String(); got != wantLine {
+		t.Fatalf("external writer got %q want %q", got, wantLine)
+	}
+
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(debugPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), wantLine) {
+		t.Fatalf("debug file missing framed line: %q", data)
+	}
+}
+
+// TestOptionsExternalWriter_WithoutDebugFile: the external writer must work
+// even without a debug file — the UI mode is discard(base) + external. The
+// sink must not be the bare io.Discard singleton in that case.
+func TestOptionsExternalWriter_WithoutDebugFile(t *testing.T) {
+	external := &safeBuffer{}
+	lg, err := New(Options{
+		ExternalWriter: external,
+		Stderr:         io.Discard,
+		Now:            fixedNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lg.Close()
+
+	if lg.DebugLogPath() != "" {
+		t.Fatalf("expected no debug log path, got %q", lg.DebugLogPath())
+	}
+	sink := lg.StderrSink("ffmpeg")
+	if sink == io.Discard {
+		t.Fatal("StderrSink must not be io.Discard when only ExternalWriter is set")
+	}
+	if _, err := io.WriteString(sink, "frame=  123\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	wantPrefix := "[" + fixedNow().Format("15:04:05.000") + " ffmpeg] "
+	got := external.String()
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("external writer line missing prefix, got %q want prefix %q", got, wantPrefix)
+	}
+	if !strings.HasSuffix(got, "frame=  123\n") {
+		t.Fatalf("external writer missing payload/newline, got %q", got)
+	}
+}
+
+// TestNilInjections_Unchanged pins the zero-value Options CLI path: no
+// injected handler/writer means byte-for-byte the old behaviour — the sink
+// short-circuits to the io.Discard singleton, logging and Close never panic.
+func TestNilInjections_Unchanged(t *testing.T) {
+	lg, err := New(Options{Stderr: io.Discard, Now: fixedNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sink := lg.StderrSink("ytdlp"); sink != io.Discard {
+		t.Fatalf("zero-value injection path must hand out io.Discard singleton, got %T", sink)
+	}
+	lg.Slog().Info("still works")
+	lg.Slog().Debug("filtered as before")
+	lg.StepStart("noop")
+	if err := lg.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatalf("idempotent close: %v", err)
 	}
 }

@@ -76,3 +76,9 @@ naming:
 # 留空 = 使用内置默认（chrome）。
 auth:
   cookies_from_browser: chrome
+
+# 本地 Web 界面配置（仅无参数启动、进入界面模式时生效；命令行下载流程不读取本段）。
+server:
+  port: 0            # 界面模式监听端口；0 = 随机端口。仅无参数启动界面时生效
+  open_browser: true # 启动后自动打开浏览器
+  chrome_app: true   # macOS 优先用 Chrome --app 独立窗口打开

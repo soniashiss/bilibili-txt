@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,6 +34,43 @@ type Options struct {
 	Bvid           string
 	Now            func() time.Time
 	Stderr         io.Writer
+	// Handler is an OPTIONAL extra slog sink (the Web UI handler that
+	// streams step start/done/fail records to the browser). When non-nil
+	// the primary handler and Handler are wrapped in a fan-out so both
+	// see every accepted record; zero-value Options leave the primary
+	// handler untouched, so the CLI path is byte-identical. Each fan-out
+	// branch filters by its own level: Enabled is the OR of all branches
+	// (a debug-enabled UI branch still observes Debug records under an
+	// info-level primary), and Handle only forwards a record to branches
+	// whose own Enabled reports true, so the standard text/json handlers
+	// (which do not re-filter inside Handle) never emit below level.
+	//
+	// Lifecycle: the logger does NOT own an injected Handler and never
+	// closes it. The caller owns its resources and MUST release them only
+	// after Logger.Close has returned (post-Close log calls are drained to
+	// io.Discard, not to this branch). Close does not notify the injected
+	// branch in any way.
+	Handler slog.Handler
+	// ExternalWriter is an OPTIONAL extra sink for whole, prefix-framed
+	// external-tool lines (yt-dlp/ffmpeg/whisper stderr/stdout), the same
+	// byte stream the debug file would receive. It stays active even
+	// without WriteDebugFile (UI mode = io.Discard base + ExternalWriter).
+	//
+	// The logger adds NO buffering, isolation, retry or wait around it:
+	// external writes execute synchronously and inline inside debugSink's
+	// mutex (via io.MultiWriter), on the exec pipeline's own goroutine.
+	// A blocking ExternalWriter therefore stalls every sink write for the
+	// whole pipeline (including lines from other tools, which serialize on
+	// the same mutex), and an error it returns propagates up the write
+	// path exactly like a debug-file write error. Consequently "never
+	// block, always return nil" is a MANDATORY contract, not advice — the
+	// Web side honours it with a non-blocking channel send.
+	//
+	// MultiWriter order: the debug file (when WriteDebugFile=true) is the
+	// first writer and ExternalWriter is the second. io.MultiWriter stops
+	// at the first error, so if the debug-file write fails for a line the
+	// ExternalWriter never receives that line.
+	ExternalWriter io.Writer
 }
 
 type Logger struct {
@@ -190,9 +228,17 @@ func New(opts Options) (*Logger, error) {
 	} else {
 		handler = slog.NewTextHandler(primary, handlerOpts)
 	}
+	if opts.Handler != nil {
+		handler = newFanoutHandler(handler, opts.Handler)
+	}
+
+	// base external-line sink: the debug file when enabled, otherwise
+	// io.Discard. ExternalWriter (UI) is an additional branch on top, so
+	// its framed lines are byte-identical to the debug-file stream.
+	var externalBase io.Writer = io.Discard
 
 	lg := &Logger{
-		debugSink: newDebugSink(io.Discard),
+		debugSink: newDebugSink(externalBase),
 		now:       opts.Now,
 	}
 	lg.slogPtr.Store(slog.New(handler))
@@ -206,11 +252,16 @@ func New(opts Options) (*Logger, error) {
 		if err != nil {
 			return nil, fmt.Errorf("logger: open debug log file %s: %w", path, err)
 		}
-		lg.debugSink.swap(f)
+		externalBase = f
 		lg.debugLogPath = path
 		closers = append(closers, f)
 		lg.Slog().Debug("debug log file created", "path", path)
 	}
+
+	if opts.ExternalWriter != nil {
+		externalBase = io.MultiWriter(externalBase, opts.ExternalWriter)
+	}
+	lg.debugSink.swap(externalBase)
 
 	lg.closers = closers
 	success = true
@@ -239,6 +290,64 @@ func parseLevel(raw string) (slog.Level, error) {
 func (l *Logger) Slog() *slog.Logger { return l.slogPtr.Load() }
 
 func (l *Logger) DebugLogPath() string { return l.debugLogPath }
+
+// fanoutHandler duplicates every accepted record to all wrapped handlers
+// (the primary text/json handler plus an optional injected UI handler).
+//
+//   - Enabled reports true when ANY branch would accept the level. Because
+//     slog.Logger gates each log call on a single Enabled check, this OR is
+//     what lets a debug-enabled injected branch observe Debug records while
+//     the primary stays at info.
+//   - Handle fans the record out only to branches whose own Enabled is true.
+//     The stdlib text/json handlers do NOT re-check level inside Handle, so
+//     this per-branch gate is what keeps each branch on its configured
+//     level. Branch errors are deliberately swallowed: a failing UI sink
+//     must never break the primary CLI log path or propagate out of a log
+//     call into the pipeline.
+//   - WithAttrs/WithGroup derive every branch and return a new fanout, so
+//     logger.With / WithComponent attrs reach the injected branch too.
+type fanoutHandler struct {
+	handlers []slog.Handler
+}
+
+func newFanoutHandler(primary, extra slog.Handler) *fanoutHandler {
+	return &fanoutHandler{handlers: []slog.Handler{primary, extra}}
+}
+
+func (f *fanoutHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	for _, h := range f.handlers {
+		if h.Enabled(ctx, l) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
+	for _, h := range f.handlers {
+		if !h.Enabled(ctx, r.Level) {
+			continue
+		}
+		_ = h.Handle(ctx, r)
+	}
+	return nil
+}
+
+func (f *fanoutHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	derived := make([]slog.Handler, len(f.handlers))
+	for i, h := range f.handlers {
+		derived[i] = h.WithAttrs(attrs)
+	}
+	return &fanoutHandler{handlers: derived}
+}
+
+func (f *fanoutHandler) WithGroup(name string) slog.Handler {
+	derived := make([]slog.Handler, len(f.handlers))
+	for i, h := range f.handlers {
+		derived[i] = h.WithGroup(name)
+	}
+	return &fanoutHandler{handlers: derived}
+}
 
 // With returns a derived logger that shares the parent's debug sink and file
 // descriptors. Callers MUST NOT invoke Close on the derived logger; the parent

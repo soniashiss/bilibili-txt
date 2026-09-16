@@ -80,6 +80,17 @@ type Logging struct {
 	DebugFile string `yaml:"debug_file"`
 }
 
+// Server groups the knobs for the local Web UI that opens when
+// bilibili-txt is started with no arguments. Port 0 means "pick a
+// random free port"; OpenBrowser controls the post-startup browser
+// launch; ChromeApp asks macOS to prefer a Chrome --app standalone
+// window over a regular tab.
+type Server struct {
+	Port        int  `yaml:"port"`
+	OpenBrowser bool `yaml:"open_browser"`
+	ChromeApp   bool `yaml:"chrome_app"`
+}
+
 // Config is the fully resolved configuration passed into the pipeline.
 // It is a plain value type on purpose: copies are cheap and there is no
 // hidden state.
@@ -88,6 +99,7 @@ type Config struct {
 	Format    string  `yaml:"format"`
 	Model     string  `yaml:"model"`
 	Logging   Logging `yaml:"logging"`
+	Server    Server  `yaml:"server"`
 	// Debug is a plain scalar (`debug: true|false`). It toggles the
 	// debug branch: write the per-run external-stderr log file and
 	// (unless logging.level is explicitly set) raise the log level to
@@ -121,6 +133,7 @@ func Default() (*Config, error) {
 		Logging: Logging{Format: "text"},
 		Naming:  Naming{OnConflict: "ask"},
 		Auth:    Auth{CookiesFromBrowser: "chrome"},
+		Server:  Server{Port: 0, OpenBrowser: true, ChromeApp: true},
 	}
 
 	home, err := userHome()
@@ -284,6 +297,17 @@ func applyConfigFile(c *Config, path string, raw []byte) (*Config, error) {
 			c.Logging.DebugFile = p
 		}
 	}
+	if file.Server != nil {
+		if file.Server.Port != nil {
+			c.Server.Port = *file.Server.Port
+		}
+		if file.Server.OpenBrowser != nil {
+			c.Server.OpenBrowser = *file.Server.OpenBrowser
+		}
+		if file.Server.ChromeApp != nil {
+			c.Server.ChromeApp = *file.Server.ChromeApp
+		}
+	}
 	if file.Debug != nil {
 		c.Debug = *file.Debug
 	}
@@ -392,6 +416,15 @@ func Merge(base, cli *Config) *Config {
 	if cli.Logging.DebugFile != "" {
 		out.Logging.DebugFile = cli.Logging.DebugFile
 	}
+	if cli.Server.Port != 0 {
+		out.Server.Port = cli.Server.Port
+	}
+	if cli.Server.OpenBrowser {
+		out.Server.OpenBrowser = true
+	}
+	if cli.Server.ChromeApp {
+		out.Server.ChromeApp = true
+	}
 	if cli.Debug {
 		out.Debug = true
 	}
@@ -451,6 +484,9 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("logging.level: 不支持的值 %q (可选：debug|info|warn|error)", c.Logging.Level)
 	}
+	if c.Server.Port < 0 || c.Server.Port > 65535 {
+		return fmt.Errorf("server.port: 端口超出范围 %d (可选：0 或 1..65535，0 = 随机端口)", c.Server.Port)
+	}
 	return nil
 }
 
@@ -466,6 +502,7 @@ type rawConfig struct {
 	Binaries      *rawBinaries `yaml:"binaries"`
 	Naming        *rawNaming   `yaml:"naming"`
 	Auth          *rawAuth     `yaml:"auth"`
+	Server        *rawServer   `yaml:"server"`
 }
 
 type rawLogging struct {
@@ -487,6 +524,12 @@ type rawNaming struct {
 
 type rawAuth struct {
 	CookiesFromBrowser *string `yaml:"cookies_from_browser"`
+}
+
+type rawServer struct {
+	Port        *int  `yaml:"port"`
+	OpenBrowser *bool `yaml:"open_browser"`
+	ChromeApp   *bool `yaml:"chrome_app"`
 }
 
 // normalizeBinary trims whitespace; empty ⇒ "" (means unspecified). Otherwise

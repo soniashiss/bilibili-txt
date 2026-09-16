@@ -46,6 +46,31 @@
 //   - Returning `*Result` (rather than just an error) matches
 //     contracts.md §一.3 and lets the CLI layer report OutputPath /
 //     Source without a second stat call.
+//
+// # 步骤日志契约（internal/webui 依赖）
+//
+// 每个步骤都通过 [logger.StepStart] / [logger.StepDone] /
+// [logger.StepFail] 打出三条固定的 slog 消息："step start"、
+// "step done"、"step fail"，并统一携带 "step" 字符串属性标明步骤名。
+// 这些消息文本与 step 取值属于跨包的外部依赖契约：internal/webui 用
+// 一个 slog.Handler 解析这些日志来生成界面进度事件（phase）。因此
+// 重命名消息文本或任一 step 取值时，必须同步修改 internal/webui，
+// 否则界面进度会在没有编译错误的情况下悄悄失效。
+//
+// 当前全部 step 取值为：
+//
+//   - "metadata"
+//   - "download-subtitle"（字幕分支）
+//   - "parse-subtitle"（字幕分支）
+//   - "download-audio"（ASR 分支）
+//   - "transcode"（ASR 分支）
+//   - "transcribe"（ASR 分支）
+//   - "parse-asr"（ASR 分支）
+//   - "format"（字幕与 ASR 两条分支共用）
+//
+// 属性约定："step done" 与 "step fail" 均带 "took"（该步骤耗时，
+// 字符串形式）；"step fail" 额外带 "err"（错误文本），并在配置了
+// debug 日志文件时带 "debug_log"（debug 日志路径）。
 package pipeline
 
 import (
