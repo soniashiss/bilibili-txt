@@ -4,11 +4,7 @@ package webui
 
 import "os/exec"
 
-func openBrowser(url string, chromeApp bool) error {
-	if chromeApp {
-		if err := exec.Command("open", "-na", "Google Chrome", "--args", "--app="+url).Start(); err == nil {
-			return nil
-		}
-	}
+// openBrowser opens url in the user's default browser as a normal tab.
+func openBrowser(url string) error {
 	return exec.Command("open", url).Start()
 }

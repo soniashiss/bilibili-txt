@@ -406,5 +406,14 @@ events.onerror = () => {
   // 浏览器原生自动重连；重连成功后 onopen 清空容器，服务端重放全量缓冲。
 };
 
+// 转换进行中关闭窗口会连带结束后台服务并中断任务，先让用户确认一次；
+// 空闲时关闭则不打扰（后台会随最后一个连接断开自动退出）。
+window.addEventListener("beforeunload", (e) => {
+  if (state.running) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
+
 loadHealth();
 loadHistory();

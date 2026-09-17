@@ -7,7 +7,8 @@ import (
 	"runtime"
 )
 
-func openBrowser(url string, _ bool) error {
+// openBrowser opens url in the user's default browser as a normal tab.
+func openBrowser(url string) error {
 	switch runtime.GOOS {
 	case "windows":
 		return exec.Command("cmd", "/c", "start", "", url).Start()

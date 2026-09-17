@@ -17,6 +17,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"bilibili-txt/internal/config"
@@ -34,6 +35,14 @@ const (
 	maxTranscriptSize = 20 << 20
 	// shutdownGrace bounds each graceful-shutdown stage.
 	shutdownGrace = 5 * time.Second
+	// absentGrace is how long the server waits after the last UI client
+	// disconnects before exiting: long enough to cover a page reload or
+	// EventSource's native reconnect, short enough to feel instant when the
+	// window is simply closed.
+	absentGrace = 5 * time.Second
+	// heartbeatInterval keeps idle SSE connections alive through proxies
+	// and makes a dead client detectable promptly.
+	heartbeatInterval = 25 * time.Second
 )
 
 // Config configures a Web UI server.
@@ -55,24 +64,30 @@ type Config struct {
 	Opener func(url string) error
 	// OpenBrowser enables the post-startup browser launch in Run.
 	OpenBrowser bool
-	// ChromeApp asks macOS to prefer a Chrome --app standalone window;
-	// ignored on other platforms and when Opener is injected.
-	ChromeApp bool
+	// QuitWhenClosed makes Run exit after the last UI client stays
+	// disconnected for absentGrace, i.e. when the user closes the only
+	// window. Tests leave it off so a temporary client drop cannot end Run.
+	QuitWhenClosed bool
+	// AbsentGrace overrides the package-default absent grace when positive;
+	// zero keeps the default.
+	AbsentGrace time.Duration
 }
 
 // Server is the local Web UI HTTP server.
 type Server struct {
-	cfg         *config.Config
-	opener      func(url string) error
-	openBrowser bool
-	chromeApp   bool
+	cfg            *config.Config
+	opener         func(url string) error
+	openBrowser    bool
+	quitWhenClosed bool
 
-	b         *broker
-	svc       *service
-	token     string
-	health    []preflight.CheckResult
-	indexTmpl *template.Template
-	staticFS  fs.FS
+	b          *broker
+	svc        *service
+	token      string
+	health     []preflight.CheckResult
+	indexTmpl  *template.Template
+	staticFS   fs.FS
+	presence   *presence
+	clientQuit chan struct{}
 
 	ln   net.Listener
 	http *http.Server
@@ -139,17 +154,28 @@ func New(c Config) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:         cfg,
-		opener:      c.Opener,
-		openBrowser: c.OpenBrowser,
-		chromeApp:   c.ChromeApp,
-		b:           b,
-		svc:         svc,
-		token:       token,
-		health:      health,
-		indexTmpl:   indexTmpl,
-		staticFS:    staticFS,
-		ln:          ln,
+		cfg:            cfg,
+		opener:         c.Opener,
+		openBrowser:    c.OpenBrowser,
+		quitWhenClosed: c.QuitWhenClosed,
+		b:              b,
+		svc:            svc,
+		token:          token,
+		health:         health,
+		indexTmpl:      indexTmpl,
+		staticFS:       staticFS,
+		ln:             ln,
+	}
+	if c.QuitWhenClosed {
+		grace := absentGrace
+		if c.AbsentGrace > 0 {
+			grace = c.AbsentGrace
+		}
+		s.clientQuit = make(chan struct{})
+		var quitOnce sync.Once
+		s.presence = newPresence(grace, func() {
+			quitOnce.Do(func() { close(s.clientQuit) })
+		})
 	}
 	// ReadTimeout and WriteTimeout are deliberately left unset: the
 	// /api/events SSE connection is long-lived, and either deadline would
@@ -181,10 +207,19 @@ func (s *Server) Addr() string {
 	return s.ln.Addr().String()
 }
 
-// Run serves until ctx is canceled, then shuts the service and the HTTP
-// server down gracefully (service first so every SSE connection exits
-// before http.Server.Shutdown waits on active connections).
+// Run serves until ctx is canceled (or, in QuitWhenClosed mode, until the
+// last UI client stays absent for absentGrace), then shuts the service and
+// the HTTP server down gracefully (service first so every SSE connection
+// exits before http.Server.Shutdown waits on active connections).
 func (s *Server) Run(ctx context.Context) error {
+	// s.clientQuit is nil unless QuitWhenClosed was set; a nil channel in
+	// the select below simply never fires.
+	defer func() {
+		if s.presence != nil {
+			s.presence.stop()
+		}
+	}()
+
 	serveErr := make(chan error, 1)
 	go func() {
 		if err := s.http.Serve(s.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -197,7 +232,7 @@ func (s *Server) Run(ctx context.Context) error {
 		addr := "http://" + s.Addr() + "/"
 		opener := s.opener
 		if opener == nil {
-			opener = func(u string) error { return openBrowser(u, s.chromeApp) }
+			opener = openBrowser
 		}
 		if err := opener(addr); err != nil {
 			fmt.Fprintf(os.Stderr, "webui: 打开浏览器失败: %v（请手动访问 %s）\n", err, addr)
@@ -206,6 +241,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+	case <-s.clientQuit:
+		fmt.Fprintln(os.Stderr, "webui: 界面已关闭，正在退出…")
 	case err := <-serveErr:
 		return err
 	}
@@ -444,6 +481,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.b.unsubscribe(sub)
 
+	// Count this connection for QuitWhenClosed presence tracking. The
+	// deferred disconnect (after unsubscribe) starts the absent grace
+	// window when the last window/tab closes.
+	if s.presence != nil {
+		s.presence.connect()
+		defer s.presence.disconnect()
+	}
+
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case ev, open := <-sub.ch:
@@ -455,6 +503,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			// SSE comment frame: ignored by EventSource, but proves the
+			// connection is alive (and surfaces a dead client as a write
+			// error) without waking onmessage.
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
 				return
 			}
 			flusher.Flush()

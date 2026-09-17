@@ -81,4 +81,3 @@ auth:
 server:
   port: 0            # 界面模式监听端口；0 = 随机端口。仅无参数启动界面时生效
   open_browser: true # 启动后自动打开浏览器
-  chrome_app: true   # macOS 优先用 Chrome --app 独立窗口打开

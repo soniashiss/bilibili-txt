@@ -960,7 +960,7 @@ func TestLoad_AuthUnknownFieldRejected(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestServerDefaults pins the built-in server defaults: random port and
-// both UX knobs on (auto-open browser, Chrome --app window on macOS).
+// the auto-open-browser knob on.
 func TestServerDefaults(t *testing.T) {
 	fakeHome(t)
 	c, err := Default()
@@ -973,20 +973,17 @@ func TestServerDefaults(t *testing.T) {
 	if !c.Server.OpenBrowser {
 		t.Errorf("Server.OpenBrowser=%v want true", c.Server.OpenBrowser)
 	}
-	if !c.Server.ChromeApp {
-		t.Errorf("Server.ChromeApp=%v want true", c.Server.ChromeApp)
-	}
 }
 
-// TestServerLoad covers both the explicit-override path (all three
-// fields written, including the bools flipped to false) and the
-// partial-override path (only port written; the true-by-default bools
-// must survive because rawServer uses *bool).
+// TestServerLoad covers both the explicit-override path (both fields
+// written, including the bool flipped to false) and the partial-override
+// path (only port written; the true-by-default bool must survive because
+// rawServer uses *bool).
 func TestServerLoad(t *testing.T) {
 	fakeHome(t)
 	dir := t.TempDir()
 
-	full := "server:\n  port: 8787\n  open_browser: false\n  chrome_app: false\n"
+	full := "server:\n  port: 8787\n  open_browser: false\n"
 	c, err := Load(writeTemp(t, dir, "full.yaml", full))
 	if err != nil {
 		t.Fatalf("Load(full server block): %v", err)
@@ -996,9 +993,6 @@ func TestServerLoad(t *testing.T) {
 	}
 	if c.Server.OpenBrowser {
 		t.Errorf("Server.OpenBrowser=%v want false (explicit)", c.Server.OpenBrowser)
-	}
-	if c.Server.ChromeApp {
-		t.Errorf("Server.ChromeApp=%v want false (explicit)", c.Server.ChromeApp)
 	}
 
 	portOnly := "server:\n  port: 8787\n"
@@ -1011,9 +1005,6 @@ func TestServerLoad(t *testing.T) {
 	}
 	if !c2.Server.OpenBrowser {
 		t.Errorf("Server.OpenBrowser=%v want true (default preserved)", c2.Server.OpenBrowser)
-	}
-	if !c2.Server.ChromeApp {
-		t.Errorf("Server.ChromeApp=%v want true (default preserved)", c2.Server.ChromeApp)
 	}
 }
 
@@ -1038,24 +1029,20 @@ func TestServerUnknownFieldRejected(t *testing.T) {
 func TestServerMerge(t *testing.T) {
 	fakeHome(t)
 	base := mustDefault(t)
-	base.Server = Server{Port: 9000, OpenBrowser: false, ChromeApp: true}
+	base.Server = Server{Port: 9000, OpenBrowser: false}
 
 	got := Merge(base, &Config{})
 	if got.Server != base.Server {
 		t.Errorf("empty overlay changed Server: got=%+v want=%+v", got.Server, base.Server)
 	}
 
-	overlay := &Config{Server: Server{Port: 8080, OpenBrowser: true, ChromeApp: false}}
+	overlay := &Config{Server: Server{Port: 8080, OpenBrowser: true}}
 	got = Merge(base, overlay)
 	if got.Server.Port != 8080 {
 		t.Errorf("Server.Port=%d want 8080 (non-zero overlay wins)", got.Server.Port)
 	}
 	if !got.Server.OpenBrowser {
 		t.Errorf("Server.OpenBrowser=%v want true (overlay turns on)", got.Server.OpenBrowser)
-	}
-	if !got.Server.ChromeApp {
-		t.Errorf("Server.ChromeApp=%v want true (base already true, overlay false must not clear)",
-			got.Server.ChromeApp)
 	}
 }
 

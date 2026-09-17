@@ -295,15 +295,15 @@ func TestNoArgs_StartsUI(t *testing.T) {
 	if gotCfg == nil {
 		t.Fatal("startWebUI 收到的 cfg 为 nil")
 	}
-	if !gotCfg.Server.OpenBrowser || !gotCfg.Server.ChromeApp {
-		t.Fatalf("默认 server 段应为 OpenBrowser/ChromeApp 均开：%+v", gotCfg.Server)
+	if !gotCfg.Server.OpenBrowser {
+		t.Fatalf("默认 server 段应开启 OpenBrowser：%+v", gotCfg.Server)
 	}
 }
 
 func TestNoArgs_StartsUI_ConfigPassthrough(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	yaml := "server:\n  port: 8765\n  open_browser: false\n  chrome_app: false\n"
+	yaml := "server:\n  port: 8765\n  open_browser: false\n"
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
 		t.Fatalf("写测试配置失败: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestNoArgs_StartsUI_ConfigPassthrough(t *testing.T) {
 	if gotCfg == nil {
 		t.Fatal("startWebUI 收到的 cfg 为 nil")
 	}
-	if gotCfg.Server.Port != 8765 || gotCfg.Server.OpenBrowser || gotCfg.Server.ChromeApp {
+	if gotCfg.Server.Port != 8765 || gotCfg.Server.OpenBrowser {
 		t.Fatalf("server 段未透传：%+v", gotCfg.Server)
 	}
 }

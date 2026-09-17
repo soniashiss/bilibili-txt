@@ -83,12 +83,10 @@ type Logging struct {
 // Server groups the knobs for the local Web UI that opens when
 // bilibili-txt is started with no arguments. Port 0 means "pick a
 // random free port"; OpenBrowser controls the post-startup browser
-// launch; ChromeApp asks macOS to prefer a Chrome --app standalone
-// window over a regular tab.
+// launch.
 type Server struct {
 	Port        int  `yaml:"port"`
 	OpenBrowser bool `yaml:"open_browser"`
-	ChromeApp   bool `yaml:"chrome_app"`
 }
 
 // Config is the fully resolved configuration passed into the pipeline.
@@ -133,7 +131,7 @@ func Default() (*Config, error) {
 		Logging: Logging{Format: "text"},
 		Naming:  Naming{OnConflict: "ask"},
 		Auth:    Auth{CookiesFromBrowser: "chrome"},
-		Server:  Server{Port: 0, OpenBrowser: true, ChromeApp: true},
+		Server:  Server{Port: 0, OpenBrowser: true},
 	}
 
 	home, err := userHome()
@@ -304,9 +302,6 @@ func applyConfigFile(c *Config, path string, raw []byte) (*Config, error) {
 		if file.Server.OpenBrowser != nil {
 			c.Server.OpenBrowser = *file.Server.OpenBrowser
 		}
-		if file.Server.ChromeApp != nil {
-			c.Server.ChromeApp = *file.Server.ChromeApp
-		}
 	}
 	if file.Debug != nil {
 		c.Debug = *file.Debug
@@ -422,9 +417,6 @@ func Merge(base, cli *Config) *Config {
 	if cli.Server.OpenBrowser {
 		out.Server.OpenBrowser = true
 	}
-	if cli.Server.ChromeApp {
-		out.Server.ChromeApp = true
-	}
 	if cli.Debug {
 		out.Debug = true
 	}
@@ -529,7 +521,6 @@ type rawAuth struct {
 type rawServer struct {
 	Port        *int  `yaml:"port"`
 	OpenBrowser *bool `yaml:"open_browser"`
-	ChromeApp   *bool `yaml:"chrome_app"`
 }
 
 // normalizeBinary trims whitespace; empty ⇒ "" (means unspecified). Otherwise

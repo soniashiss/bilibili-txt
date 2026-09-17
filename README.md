@@ -74,8 +74,8 @@ bilibili-txt
 几点说明：
 
 - 服务只监听本机 `127.0.0.1` 的一个**随机端口**，并带一次性访问令牌（仅注入到本地页面），局域网其它设备访问不了。
-- 服务在终端**前台**运行，回到终端按 **Ctrl-C** 退出；只关闭浏览器窗口不会停止服务。
-- macOS 下默认优先用 Chrome 的 `--app` 独立窗口打开，没有 Chrome 或关闭该选项时回退到系统默认浏览器。
+- 服务在终端**前台**运行，回到终端按 **Ctrl-C** 退出；关闭浏览器窗口后，服务会在短时间内自动结束。
+- 默认用系统默认浏览器以新标签页打开界面。
 - 界面模式只读取 `config/config.yaml`，不接受 `--force-asr` / `--keep-intermediate` / `--overwrite` / `--skip` / `-o` 这些只对单次转换有意义的参数（和它们一起用会直接报错）。
 
 界面相关的可选配置（同样写在 `config/config.yaml`）：
@@ -84,7 +84,6 @@ bilibili-txt
 server:
   port: 0            # 监听端口；0 = 随机端口（默认）
   open_browser: true # 启动后是否自动打开浏览器
-  chrome_app: true   # macOS 是否优先用 Chrome --app 独立窗口
 ```
 
 ---

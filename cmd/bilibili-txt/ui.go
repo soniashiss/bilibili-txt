@@ -21,15 +21,15 @@ var uiContext = func() (context.Context, context.CancelFunc) {
 
 var startWebUI = func(ctx context.Context, cfg *config.Config) error {
 	srv, err := webui.New(webui.Config{
-		HTTPPort:    cfg.Server.Port,
-		Cfg:         cfg,
-		OpenBrowser: cfg.Server.OpenBrowser,
-		ChromeApp:   cfg.Server.ChromeApp,
+		HTTPPort:       cfg.Server.Port,
+		Cfg:            cfg,
+		OpenBrowser:    cfg.Server.OpenBrowser,
+		QuitWhenClosed: cfg.Server.OpenBrowser,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "界面已启动：http://%s/ （Ctrl-C 退出）\n", srv.Addr())
+	fmt.Fprintf(os.Stderr, "界面已启动：http://%s/ （关闭窗口或 Ctrl-C 退出）\n", srv.Addr())
 	return srv.Run(ctx)
 }
 
